@@ -1,126 +1,136 @@
-﻿import collections
 import heapq
-import threading
 import time
-import random
+import networkx as nx
+import matplotlib.pyplot as plt
 
-class RouteService:
+class RoadNetwork:
     def __init__(self):
-        self.graph = collections.defaultdict(dict)
+        self.graph = {}
         self.disabled_edges = set()
-        # Müəllimə: Thread-safe əməliyyatlar üçün Lock
-        self.lock = threading.RLock() 
-        self.version_id = 0 # Müəllimə: "Versioned graph" yanaşması üçün
 
     def add_edge(self, u, v, weight=1.0):
-        with self.lock:
-            self.graph[u][v] = weight
-            self.graph[v][u] = weight
-            self.version_id += 1
+        if u not in self.graph: self.graph[u] = {}
+        if v not in self.graph: self.graph[v] = {}
+        self.graph[u][v] = weight
+        self.graph[v][u] = weight
 
-    def disable_edge(self, u, v):
-        with self.lock:
-            self.disabled_edges.add((u, v))
-            self.disabled_edges.add((v, u))
-            self.version_id += 1
-            print(f"\n[SİSTEM YENİLƏNMƏSİ]: {u}-{v} yolu bloklandı. (Versiya: {self.version_id})")
+    def load_from_mtx(self, filename):
+        print(f"[*] Loading dataset: {filename}...")
+        start_time = time.time()
+        try:
+            with open(filename, 'r') as f:
+                count = 0
+                for line in f:
+                    if line.startswith('%'): continue
+                    parts = list(map(int, line.split()))
+                    if len(parts) >= 2:
+                        self.add_edge(parts[0], parts[1])
+                        count += 1
+                        # İlk 50,000 əlaqəni yükləyirik ki, həm sürətli olsun, həm də vizual donmasın
+                        if count > 50000: break 
+            print(f"[+] Dataset loaded in {time.time() - start_time:.2f} seconds.")
+        except FileNotFoundError:
+            print("[-] Error: Dataset file not found! Make sure roadNet-PA.mtx is in the same folder.")
 
-    def get_neighbors(self, node):
-        if node not in self.graph: return {}
-        return {n: w for n, w in self.graph[node].items() 
-                if (node, n) not in self.disabled_edges}
+    def get_shortest_path(self, start, end):
+        if start not in self.graph or end not in self.graph:
+            return None, float('inf')
 
-    def find_shortest_path(self, start_node, end_node, user_id="User"):
-        # Dijkstra Alqoritmi
-        distances = {node: float('inf') for node in self.graph}
-        distances[start_node] = 0
-        previous_nodes = {node: None for node in self.graph}
-        pq = [(0, start_node)]
+        queue = [(0, start, [])]
+        visited = {start: 0}
 
-        while pq:
-            current_distance, current_node = heapq.heappop(pq)
-            if current_node == end_node: break
-            if current_distance > distances[current_node]: continue
+        while queue:
+            (cost, node, path) = heapq.heappop(queue)
+            if node == end:
+                return path + [node], cost
 
-            for neighbor, weight in self.get_neighbors(current_node).items():
-                distance = current_distance + weight
-                if distance < distances[neighbor]:
-                    distances[neighbor] = distance
-                    previous_nodes[neighbor] = current_node
-                    heapq.heappush(pq, (distance, neighbor))
-
-        path = []
-        current = end_node
-        while current is not None:
-            path.append(current)
-            current = previous_nodes[current]
-        path.reverse()
-        
-        res = path if (path and path[0] == start_node) else None
-        if res:
-            print(f"[{user_id}]: Yol tapıldı! ({len(res)} nöqtə)")
-        return res
-
-    def load_from_mtx(self, file_path):
-        print(f"Məlumatlar {file_path} faylından yüklənir...")
-        count = 0
-        with open(file_path, 'r') as f:
-            for line in f:
-                if line.startswith('%') or not line.strip(): continue
-                parts = line.split()
-                if len(parts) == 3 and count == 0:
-                    count += 1
+            for neighbor, weight in self.graph.get(node, {}).items():
+                if (node, neighbor) in self.disabled_edges or (neighbor, node) in self.disabled_edges:
                     continue
-                if len(parts) >= 2:
-                    self.add_edge(parts[0], parts[1])
-                    count += 1
-        print(f"Uğurlu! {count} yol yükləndi. (Versiya: {self.version_id})")
+                
+                new_cost = cost + weight
+                if neighbor not in visited or new_cost < visited[neighbor]:
+                    visited[neighbor] = new_cost
+                    heapq.heappush(queue, (new_cost, neighbor, path + [node]))
+        return None, float('inf')
 
-def run_concurrent_test(service):
-    """Müəllimə: Eyni anda bir çox sorğunun işləməsini nümayiş etdirir"""
-    threads = []
-    print("\n--- CONCURRENCY TESTİ BAŞLADI (10 istifadəçi eyni anda) ---")
-    for i in range(10):
-        # Hər user üçün random nöqtələr seçirik
-        u_id = f"İstifadəçi-{i+1}"
-        t = threading.Thread(target=service.find_shortest_path, args=('1', str(random.randint(100, 500)), u_id))
-        threads.append(t)
-        t.start()
-    
-    for t in threads:
-        t.join()
-    print("--- CONCURRENCY TESTİ TAMAMLANDI ---\n")
+    def draw_graph(self, path=None):
+        """Həqiqi qraf vizualizasiyası - Təkmilləşdirilmiş Versiya"""
+        print("[*] Vizual xəritə hazırlanır, bir neçə saniyə gözləyin...")
+        G = nx.Graph()
+        
+        # Vizualın donmaması üçün yalnız yolun və ətrafındakı vacib nöqtələri göstəririk
+        if path:
+            nodes_to_show = set(path)
+            # Yolun ətrafındakı bəzi qonşuları da əlavə edək ki, xəritə real görünsün
+            for node in path:
+                if node in self.graph:
+                    neighbors = list(self.graph[node].keys())[:3] # Hər nöqtədən max 3 qonşu
+                    nodes_to_show.update(neighbors)
+            
+            for u in nodes_to_show:
+                if u in self.graph:
+                    for v in self.graph[u]:
+                        if v in nodes_to_show:
+                            if (u, v) not in self.disabled_edges:
+                                G.add_edge(u, v)
+        
+        plt.figure(figsize=(10, 7))
+        plt.clf() # Köhnə çertyojları təmizlə
+        
+        # Nöqtələrin ekrandakı düzülüş alqoritmi
+        pos = nx.spring_layout(G, k=0.3, iterations=30)
+        
+        # 1. Bütün əlaqələri çək (Boz rəngdə)
+        nx.draw(G, pos, node_size=40, node_color='lightgray', edge_color='silver', width=1, with_labels=True, font_size=7)
+        
+        # 2. Tapılan yolu çək (Qırmızı və qalın)
+        if path:
+            path_edges = list(zip(path, path[1:]))
+            nx.draw_networkx_nodes(G, pos, nodelist=path, node_color='red', node_size=100)
+            nx.draw_networkx_edges(G, pos, edgelist=path_edges, edge_color='red', width=4)
+            
+        plt.title("Pennsylvania Road Network - Shortest Path Result")
+        print("[+] Xəritə pəncərəsi açılır...")
+        plt.show()
+
+def main():
+    rn = RoadNetwork()
+    rn.load_from_mtx("roadNet-PA.mtx")
+
+    while True:
+        print("\n--- Pennsylvania Navigation System ---")
+        print("1. Find Shortest Path & Show Map")
+        print("2. Block a Road (Dynamic Update)")
+        print("3. Exit")
+        choice = input("Select: ")
+
+        if choice == '1':
+            try:
+                start = int(input("Enter start node: "))
+                end = int(input("Enter destination node: "))
+                path, cost = rn.get_shortest_path(start, end)
+                if path:
+                    print(f"\n[+] Path found! Total distance: {cost}")
+                    print(f"Path: {' -> '.join(map(str, path))}")
+                    rn.draw_graph(path)
+                else:
+                    print("[-] No path found between these nodes.")
+            except ValueError:
+                print("Please enter valid numbers.")
+
+        elif choice == '2':
+            try:
+                u = int(input("Enter node 1 to block: "))
+                v = int(input("Enter node 2 to block: "))
+                rn.disabled_edges.add((u, v))
+                print(f"[!] Road between {u} and {v} is now BLOCKED.")
+            except ValueError:
+                print("Invalid input.")
+
+        elif choice == '3':
+            print("Exiting...")
+            break
 
 if __name__ == "__main__":
-    service = RouteService()
-    service.load_from_mtx('roadNet-PA.mtx')
-    
-    while True:
-        print("\n--- NAVİQASİYA SİSTEMİ ---")
-        print("1. Yol axtar (Dijkstra)")
-        print("2. Yolu bağla (Qəza simulyasiyası)")
-        print("3. Concurrency Testini işlət (Professional nümayiş)")
-        print("4. Çıxış")
-        
-        choice = input("Seçiminiz: ")
-        
-        if choice == '1':
-            start = input("Başlanğıc nöqtə (məs. 1): ")
-            end = input("Hədəf nöqtə (məs. 100): ")
-            path = service.find_shortest_path(start, end)
-            if path:
-                print(f"Marşrut tapıldı: {' -> '.join(path[:5])} ... {path[-1]}")
-            else:
-                print("Yol tapılmadı!")
-        
-        elif choice == '2':
-            u = input("Bağlanacaq yolun başlanğıcı: ")
-            v = input("Bağlanacaq yolun sonu: ")
-            service.disable_edge(u, v)
-        
-        elif choice == '3':
-            run_concurrent_test(service)
-            
-        elif choice == '4':
-            print("Sistem bağlanır. Uğurlar!")
-            break
+    main()
